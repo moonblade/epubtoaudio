@@ -2,9 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
-
-### Added - Expressive Audiobook Preprocessing
+## [PR #1] - Expressive Audiobook Preprocessing
 
 Major enhancement to produce more natural, expressive audiobook narration:
 
