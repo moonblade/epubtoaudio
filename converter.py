@@ -177,20 +177,36 @@ class ConversionJob:
             self._emit_log("info", f"Found {len(chapters)} chapters, {total_chunks} chunks")
             
             start_chunk = self.job_state.current_chunk
-            chapter_audio: dict[int, list[float]] = {}
             sample_rate = 24000
+            current_chapter = 0
+            chapter_wav_file: Optional[sf.SoundFile] = None
             
             for i, chunk_data in enumerate(all_chunks):
                 if i < start_chunk:
                     continue
                 
                 if self.should_stop.is_set():
+                    if chapter_wav_file:
+                        chapter_wav_file.close()
                     self._emit_log("info", "Conversion paused")
                     self.job_manager.update_job(job_id, status=JobStatus.PAUSED)
                     return
                 
                 chapter_num = chunk_data["chapter"]
                 progress = ((i + 1) / total_chunks) * 100
+                
+                if chapter_num != current_chapter:
+                    if chapter_wav_file:
+                        chapter_wav_file.close()
+                        chapter_wav_path = output_dir / f"chapter_{current_chapter:03d}.wav"
+                        chapter_mp3_path = output_dir / f"chapter_{current_chapter:03d}.mp3"
+                        AudioSegment.from_wav(str(chapter_wav_path)).export(str(chapter_mp3_path), format="mp3", bitrate="192k")
+                        chapter_wav_path.unlink()
+                        self._emit_log("info", f"Saved {chapter_mp3_path.name}")
+                    
+                    current_chapter = chapter_num
+                    chapter_wav_path = output_dir / f"chapter_{chapter_num:03d}.wav"
+                    chapter_wav_file = sf.SoundFile(str(chapter_wav_path), mode='w', samplerate=sample_rate, channels=1)
                 
                 self._emit_log(
                     "info",
@@ -213,35 +229,21 @@ class ConversionJob:
                     )
                     sample_rate = sr
                     
-                    if chapter_num not in chapter_audio:
-                        chapter_audio[chapter_num] = []
-                    chapter_audio[chapter_num].extend(samples)
+                    if chapter_wav_file:
+                        chapter_wav_file.write(np.array(samples))
                     
                 except Exception as e:
                     self._emit_log("warning", f"Failed to process chunk {i + 1}: {e}")
                 
                 self.job_manager.update_checkpoint(job_id, chapter_num, i + 1, len(chapters), total_chunks)
             
-            self._emit_log("info", "Saving audio files...")
-            all_samples = []
-            
-            for chapter_num in sorted(chapter_audio.keys()):
-                samples = chapter_audio[chapter_num]
-                chapter_wav = output_dir / f"chapter_{chapter_num:03d}.wav"
-                chapter_mp3 = output_dir / f"chapter_{chapter_num:03d}.mp3"
-                sf.write(str(chapter_wav), np.array(samples), sample_rate)
-                AudioSegment.from_wav(str(chapter_wav)).export(str(chapter_mp3), format="mp3", bitrate="192k")
-                chapter_wav.unlink()
-                all_samples.extend(samples)
-                self._emit_log("info", f"Saved {chapter_mp3.name}")
-            
-            if all_samples:
-                full_wav = output_dir / "full.wav"
-                full_mp3 = output_dir / "full.mp3"
-                sf.write(str(full_wav), np.array(all_samples), sample_rate)
-                AudioSegment.from_wav(str(full_wav)).export(str(full_mp3), format="mp3", bitrate="192k")
-                full_wav.unlink()
-                self._emit_log("info", f"Saved {full_mp3.name}")
+            if chapter_wav_file:
+                chapter_wav_file.close()
+                chapter_wav_path = output_dir / f"chapter_{current_chapter:03d}.wav"
+                chapter_mp3_path = output_dir / f"chapter_{current_chapter:03d}.mp3"
+                AudioSegment.from_wav(str(chapter_wav_path)).export(str(chapter_mp3_path), format="mp3", bitrate="192k")
+                chapter_wav_path.unlink()
+                self._emit_log("info", f"Saved {chapter_mp3_path.name}")
             
             self.job_manager.update_job(job_id, status=JobStatus.COMPLETED, progress=100.0)
             self._emit_log("info", "Conversion completed!", progress=100.0)

@@ -95,9 +95,6 @@
                                 {% elif job.status == 'paused' or job.status == 'failed' %}
                                 <button onclick="resumeJob('{{ job.job_id }}')" class="btn-action btn-resume">▶️</button>
                                 {% endif %}
-                                {% if job.status == 'completed' %}
-                                <a href="/jobs/{{ job.job_id }}/audio" class="btn-action btn-download">⬇️</a>
-                                {% endif %}
                                 <a href="/jobs/{{ job.job_id }}/logs-page" class="btn-action btn-logs">📋</a>
                                 <button onclick="deleteJob('{{ job.job_id }}')" class="btn-action btn-delete">🗑️</button>
                             </td>

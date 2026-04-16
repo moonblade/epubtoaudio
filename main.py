@@ -287,23 +287,6 @@ async def logs_page(request: Request, job_id: str):
     )
 
 
-@app.get("/jobs/{job_id}/audio")
-async def download_audio(job_id: str):
-    job = job_manager.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    
-    full_audio = Path(job.output_dir) / "full.mp3"
-    if not full_audio.exists():
-        raise HTTPException(status_code=404, detail="Audio file not found")
-    
-    return FileResponse(
-        str(full_audio),
-        media_type="audio/mpeg",
-        filename=f"{job.epub_filename.replace('.epub', '')}.mp3",
-    )
-
-
 @app.get("/jobs/{job_id}/audio/{chapter}")
 async def download_chapter_audio(job_id: str, chapter: int):
     job = job_manager.get_job(job_id)
