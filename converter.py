@@ -227,19 +227,12 @@ class ConversionJob:
             
             self.preprocessor = ExpressivePreprocessor(
                 narrator_voice=self.job_state.voice,
-                enable_speaker_detection=self.enable_expressive,
+                enable_speaker_detection=False,
                 use_booknlp=False,
                 book_slug=book_slug,
             )
             
-            existing_speakers = self.preprocessor.get_speaker_pitch_map()
-            if len(existing_speakers) > 1:
-                self._emit_log("info", f"Loaded {len(existing_speakers) - 1} existing speaker pitch mappings")
-            
-            if self.preprocessor.using_booknlp:
-                self._emit_log("info", "Using BookNLP for enhanced speaker detection")
-            else:
-                self._emit_log("info", "Using regex-based speaker detection (install booknlp for better accuracy)")
+            self._emit_log("info", "Dialogue detection enabled (speaker attribution disabled)")
             
             processed_chapters: list[ProcessedChapter] = []
             total_chunks = 0

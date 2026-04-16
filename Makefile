@@ -1,10 +1,13 @@
-.PHONY: setup run install clean download-models test lint logs samples
+.PHONY: setup run install clean download-models test lint logs samples test-ollama
 
 PYTHON := python3.12
 VENV := .venv
 BIN := $(VENV)/bin
 PORT := 3002
 LOG_DIR := $(HOME)/Library/Logs/epubtoaudio
+
+OLLAMA_HOST := https://ollama.sirius.moonblade.work
+OLLAMA_MODEL := qwen2.5:0.5b
 
 setup: $(VENV) install download-models
 

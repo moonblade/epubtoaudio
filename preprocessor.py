@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import requests
+import spacy
 from bs4 import BeautifulSoup, Tag
 
 
@@ -73,6 +75,13 @@ SPEECH_VERBS = [
     "began", "started", "finished", "concluded", "interrupted", "demanded",
     "questioned", "wondered", "thought", "mused", "pondered", "considered",
     "called", "spoke", "told", "repeated", "echoed",
+    "mouthed", "breathed", "rasped", "croaked", "wheezed", "grunted",
+    "quipped", "chimed", "interjected", "remarked", "noted", "observed",
+    "suggested", "proposed", "offered", "admitted", "confessed",
+    "protested", "objected", "agreed", "concurred", "countered",
+    "retorted", "prompted", "urged", "pressed", "insisted", "maintained",
+    "explained", "elaborated", "clarified", "specified",
+    "chuckled", "giggled", "snickered", "sneered", "smirked", "grinned",
 ]
 
 VOICE_PROFILES = {
@@ -149,6 +158,12 @@ NON_SPEAKER_WORDS = frozenset([
 PITCH_SHIFTS_FEMALE = [1.5, 2.5, 1.0, 3.0, 2.0]
 PITCH_SHIFTS_MALE = [-1.0, -2.0, -1.5, -0.5, -2.5]
 
+# Load spaCy model once at module level
+try:
+    _nlp = spacy.load("en_core_web_sm")
+except OSError:
+    _nlp = None
+
 
 class SpeakerTracker:
     def __init__(
@@ -215,6 +230,269 @@ class SpeakerTracker:
 
     def get_all_speakers(self) -> dict[str, float]:
         return dict(self.speaker_pitch_shifts)
+
+
+class SpacySpeakerDetector:
+    """
+    Speaker detection using spaCy dependency parsing.
+    
+    Looks both BEFORE and AFTER dialogue for attribution patterns like:
+    - "Hello," said Jason.  (verb AFTER dialogue)
+    - Jason said, "Hello."  (verb BEFORE dialogue)
+    
+    Also resolves pronouns to the most recent proper noun subject.
+    """
+    
+    def __init__(self):
+        self._nlp = _nlp
+        self._available = _nlp is not None
+        self._recent_subjects: list[str] = []
+    
+    @property
+    def is_available(self) -> bool:
+        return self._available
+    
+    def reset_context(self) -> None:
+        self._recent_subjects = []
+    
+    def _is_valid_speaker(self, text: str) -> bool:
+        if not text or len(text) < 2:
+            return False
+        text_lower = text.lower()
+        if text_lower in PRONOUNS or text_lower in NON_SPEAKER_WORDS:
+            return False
+        if len(text) == 1:
+            return False
+        if not text[0].isupper():
+            return False
+        return True
+    
+    def find_speaker(self, context_before: str, context_after: str) -> tuple[Optional[str], str]:
+        if not self._available:
+            return None, "spacy_unavailable"
+        
+        truncated_after = self._truncate_before_next_quote(context_after)
+        
+        speaker_after, method_after = self._find_speaker_in_context(truncated_after, is_after=True)
+        if speaker_after and self._is_valid_speaker(speaker_after) and method_after in ("direct", "pronoun"):
+            self._update_recent_subjects(speaker_after)
+            return speaker_after, method_after
+        
+        speaker_before, method_before = self._find_speaker_in_context(context_before, is_after=False)
+        if speaker_before and self._is_valid_speaker(speaker_before) and method_before in ("direct", "pronoun"):
+            self._update_recent_subjects(speaker_before)
+            return speaker_before, method_before
+        
+        return None, "none"
+    
+    def _truncate_before_next_quote(self, text: str) -> str:
+        quote_chars = '"\u201c\u201d\u00ab\u00bb'
+        for i, char in enumerate(text):
+            if char in quote_chars:
+                return text[:i]
+        return text
+    
+    def _find_speaker_in_context(self, context: str, is_after: bool) -> tuple[Optional[str], str]:
+        if not context.strip() or self._nlp is None:
+            return None, "empty"
+        
+        doc = self._nlp(context)
+        
+        for token in doc:
+            if token.lemma_.lower() in SPEECH_VERBS or token.text.lower() in SPEECH_VERBS:
+                for child in token.children:
+                    if child.dep_ == "nsubj":
+                        if child.pos_ == "PROPN":
+                            return child.text, "direct"
+                        elif child.pos_ == "PRON":
+                            resolved = self._resolve_pronoun(child.text, doc)
+                            if resolved:
+                                return resolved, f"pronoun:{child.text}"
+        
+        for token in doc:
+            if token.pos_ == "PROPN" and token.dep_ in ("nsubj", "ROOT"):
+                if self._is_valid_speaker(token.text):
+                    return token.text, "propn_subject"
+        
+        return None, "none"
+    
+    def _resolve_pronoun(self, pronoun: str, doc) -> Optional[str]:
+        pronoun_lower = pronoun.lower()
+        
+        for token in doc:
+            if token.pos_ == "PROPN" and token.dep_ == "nsubj":
+                if self._is_valid_speaker(token.text):
+                    return token.text
+        
+        if self._recent_subjects:
+            return self._recent_subjects[-1]
+        
+        return None
+    
+    def _update_recent_subjects(self, speaker: str) -> None:
+        if speaker not in self._recent_subjects:
+            self._recent_subjects.append(speaker)
+        if len(self._recent_subjects) > 10:
+            self._recent_subjects.pop(0)
+
+
+class OllamaSpeakerDetector:
+    """
+    Speaker detection using local Ollama LLM.
+    
+    Uses a small language model (qwen2.5:0.5b) to reason about dialogue attribution,
+    especially in rapid back-and-forth exchanges where regex/spaCy fail.
+    
+    Key advantage: Can understand conversational turn-taking:
+        "Line 1," said Jason.
+        "Line 2"  <- LLM can infer this is likely Jason continuing or a response
+        "Line 3," Mary replied.
+    
+    Environment variables:
+        OLLAMA_HOST: Ollama server URL (default: http://localhost:11434)
+        OLLAMA_MODEL: Model name (default: qwen2.5:0.5b)
+    """
+    
+    TIMEOUT_SECONDS = 10
+    
+    def __init__(self):
+        import os
+        self._host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+        self._model = os.environ.get("OLLAMA_MODEL", "qwen2.5:0.5b")
+        self._available = self._check_availability()
+        self._known_speakers: list[str] = []
+    
+    def _check_availability(self) -> bool:
+        try:
+            response = requests.get(
+                f"{self._host}/api/tags",
+                timeout=3
+            )
+            if response.status_code == 200:
+                models = response.json().get("models", [])
+                model_base = self._model.split(":")[0]
+                return any(m.get("name", "").startswith(model_base) for m in models)
+        except (requests.RequestException, ValueError):
+            pass
+        return False
+    
+    @property
+    def is_available(self) -> bool:
+        return self._available
+    
+    def reset_context(self) -> None:
+        """Reset known speakers for a new chapter."""
+        self._known_speakers = []
+    
+    def add_known_speaker(self, speaker: str) -> None:
+        """Add a speaker discovered by other methods."""
+        if speaker and speaker not in self._known_speakers:
+            self._known_speakers.append(speaker)
+    
+    def _build_prompt(self, dialogue: str, context_before: str, context_after: str) -> str:
+        """Build a focused prompt for speaker identification."""
+        known_speakers_str = ", ".join(self._known_speakers) if self._known_speakers else "none yet"
+        
+        return f"""Identify who speaks the DIALOGUE below. Use ONLY the context provided.
+
+CONTEXT BEFORE:
+{context_before.strip() if context_before.strip() else "(none)"}
+
+DIALOGUE: "{dialogue}"
+
+CONTEXT AFTER:
+{context_after.strip() if context_after.strip() else "(none)"}
+
+Known speakers in this chapter: {known_speakers_str}
+
+Rules:
+1. Look for attribution like "said X", "X replied", "X asked"
+2. In back-and-forth dialogue, speakers usually alternate
+3. If someone just spoke in CONTEXT BEFORE, the DIALOGUE is likely a DIFFERENT person responding
+4. Only name a speaker if you're confident
+5. Return ONLY the speaker's name (e.g., "Jason") or "UNKNOWN" if unclear
+
+SPEAKER:"""
+
+    def find_speaker(
+        self,
+        dialogue: str,
+        context_before: str,
+        context_after: str,
+    ) -> tuple[Optional[str], str]:
+        """
+        Find the speaker of a dialogue line using Ollama LLM.
+        
+        Returns: (speaker_name or None, method_description)
+        """
+        if not self._available:
+            return None, "ollama_unavailable"
+        
+        prompt = self._build_prompt(dialogue, context_before, context_after)
+        
+        try:
+            response = requests.post(
+                f"{self._host}/api/generate",
+                json={
+                    "model": self._model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "num_predict": 20,
+                    }
+                },
+                timeout=self.TIMEOUT_SECONDS
+            )
+            
+            if response.status_code != 200:
+                return None, f"ollama_error:{response.status_code}"
+            
+            result = response.json().get("response", "").strip()
+            speaker = self._parse_speaker_response(result)
+            
+            if speaker:
+                self.add_known_speaker(speaker)
+                return speaker, "ollama"
+            
+            return None, "ollama_unknown"
+            
+        except requests.Timeout:
+            return None, "ollama_timeout"
+        except requests.RequestException as e:
+            return None, f"ollama_error:{e}"
+    
+    def _parse_speaker_response(self, response: str) -> Optional[str]:
+        """Parse the LLM response to extract speaker name."""
+        if not response:
+            return None
+        
+        # Clean up the response
+        response = response.strip().strip('"\'').strip()
+        
+        # Check for unknown indicators
+        unknown_indicators = ["unknown", "unclear", "cannot", "can't", "not sure", "n/a", "none"]
+        if any(ind in response.lower() for ind in unknown_indicators):
+            return None
+        
+        # Extract first word/name (handle "Jason." or "Jason said" etc.)
+        words = response.split()
+        if not words:
+            return None
+        
+        speaker = words[0].strip('.,!?:;"\'')
+        
+        # Validate: should start with capital, not be a pronoun
+        if not speaker or not speaker[0].isupper():
+            return None
+        if speaker.lower() in PRONOUNS:
+            return None
+        if speaker.lower() in NON_SPEAKER_WORDS:
+            return None
+        if len(speaker) < 2:
+            return None
+        
+        return speaker
 
 
 class BookNLPSpeakerDetector:
@@ -312,8 +590,9 @@ class ExpressivePreprocessor:
     def __init__(
         self,
         narrator_voice: str = "am_adam",
-        enable_speaker_detection: bool = True,
-        use_booknlp: bool = True,
+        enable_speaker_detection: bool = False,
+        use_booknlp: bool = False,
+        use_ollama: bool = False,
         book_slug: Optional[str] = None,
     ):
         self.narrator_voice = narrator_voice
@@ -339,6 +618,14 @@ class ExpressivePreprocessor:
 
         self._scene_break_pattern = re.compile("|".join(SCENE_BREAK_PATTERNS), re.MULTILINE)
         self._speaker_attribution_pattern = self._compile_speaker_pattern()
+        
+        self._spacy_detector = SpacySpeakerDetector()
+        
+        self._ollama_detector: Optional[OllamaSpeakerDetector] = None
+        if use_ollama:
+            detector = OllamaSpeakerDetector()
+            if detector.is_available:
+                self._ollama_detector = detector
         
         self._booknlp_detector: Optional[BookNLPSpeakerDetector] = None
         if use_booknlp:
@@ -368,6 +655,7 @@ class ExpressivePreprocessor:
     def _extract_speaker_regex(self, context: str) -> Optional[str]:
         if not self.enable_speaker_detection:
             return None
+        
         match = self._speaker_attribution_pattern.search(context)
         if match:
             speaker = match.group("speaker1") or match.group("speaker2")
@@ -458,8 +746,17 @@ class ExpressivePreprocessor:
                     segments.extend(self._split_by_thoughts(narration, thought_texts))
 
             speaker = None
+            context_before = full_text[max(0, start - 200):start]
+            context_after = full_text[end:min(len(full_text), end + 200)]
+            
             if booknlp_attributions and (start, end) in booknlp_attributions:
                 speaker = booknlp_attributions[(start, end)]
+            elif self._ollama_detector and self._ollama_detector.is_available:
+                speaker, _ = self._ollama_detector.find_speaker(
+                    dialogue_text, context_before, context_after
+                )
+            elif self._spacy_detector.is_available:
+                speaker, _ = self._spacy_detector.find_speaker(context_before, context_after)
             else:
                 context_window = full_text[max(0, start - 100):min(len(full_text), end + 100)]
                 speaker = self._extract_speaker_regex(context_window)
@@ -484,6 +781,10 @@ class ExpressivePreprocessor:
     def process_chapter_html(self, html_content: bytes, title: str, order: int) -> ProcessedChapter:
         soup = BeautifulSoup(html_content, "html.parser")
         chapter = ProcessedChapter(title=title, order=order)
+        
+        self._spacy_detector.reset_context()
+        if self._ollama_detector:
+            self._ollama_detector.reset_context()
 
         chapter.segments.append(TextSegment(
             text=title,
@@ -605,6 +906,14 @@ class ExpressivePreprocessor:
     @property
     def using_booknlp(self) -> bool:
         return self._booknlp_detector is not None
+    
+    @property
+    def using_ollama(self) -> bool:
+        return self._ollama_detector is not None and self._ollama_detector.is_available
+    
+    @property
+    def using_spacy(self) -> bool:
+        return self._spacy_detector.is_available
 
 
 def generate_silence_samples(duration_seconds: float, sample_rate: int = 24000) -> list[float]:
