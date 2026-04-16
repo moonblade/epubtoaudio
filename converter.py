@@ -1,5 +1,7 @@
 #!/usr/bin/env python3.12
 import asyncio
+import re
+import shutil
 import urllib.request
 from pathlib import Path
 from threading import Event
@@ -12,7 +14,7 @@ from ebooklib import epub, ITEM_DOCUMENT
 from bs4 import BeautifulSoup
 from kokoro_onnx import Kokoro
 
-from config import MODEL_FILE, VOICES_FILE, MODEL_URL, VOICES_URL, MODELS_PATH
+from config import MODEL_FILE, VOICES_FILE, MODEL_URL, VOICES_URL, MODELS_PATH, FINAL_PATH
 from models import JobState, JobStatus, LogEvent
 from job_manager import JobManager
 from log_store import LogStore
@@ -322,9 +324,44 @@ class ConversionJob:
             self.job_manager.update_job(job_id, status=JobStatus.COMPLETED, progress=100.0)
             self._emit_log("info", "Conversion completed!", progress=100.0)
             
+            self._copy_to_final_path(output_dir)
+            
         except Exception as e:
             self._emit_log("error", f"Conversion failed: {e}")
             self.job_manager.update_job(job_id, status=JobStatus.FAILED, error=str(e))
+
+    def _sanitize_filename(self, name: str) -> str:
+        sanitized = re.sub(r'[<>:"/\\|?*]', '', name)
+        sanitized = sanitized.strip('. ')
+        return sanitized or "audiobook"
+
+    def _copy_to_final_path(self, output_dir: Path) -> None:
+        if not FINAL_PATH:
+            return
+        
+        final_path = Path(FINAL_PATH)
+        if not final_path.exists():
+            try:
+                final_path.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                self._emit_log("warning", f"Failed to create final path: {e}")
+                return
+        
+        epub_name = Path(self.job_state.epub_filename).stem
+        folder_name = self._sanitize_filename(epub_name)
+        target_dir = final_path / folder_name
+        
+        if target_dir.exists():
+            self._emit_log("info", f"Final folder already exists, overwriting: {target_dir}")
+            shutil.rmtree(target_dir)
+        
+        target_dir.mkdir(parents=True, exist_ok=True)
+        
+        mp3_files = sorted(output_dir.glob("*.mp3"))
+        for mp3_file in mp3_files:
+            shutil.copy2(mp3_file, target_dir / mp3_file.name)
+        
+        self._emit_log("info", f"Copied {len(mp3_files)} files to {target_dir}")
 
     def stop(self) -> None:
         self.should_stop.set()

@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [PR #5] - 2026-04-17 - Final Output Path Configuration
+
+Added option to copy completed audiobooks to a separate final output directory with the book name as the folder.
+
+#### Changes
+- **New env var**: `EPUBTOAUDIO_FINAL_PATH` - when set, completed MP3s are copied to this path
+- **Book name folders**: MP3s are organized into folders named after the EPUB file (e.g., `My Book.epub` → `My Book/`)
+- **Filename sanitization**: Invalid filesystem characters are removed from folder names
+- **Overwrite behavior**: If folder already exists, it is replaced with the new conversion
+
+#### Usage
+```bash
+EPUBTOAUDIO_FINAL_PATH=/audiobooks make run
+```
+
+This keeps the original job output in `OUTPUT_PATH` (for job management) while also providing a clean, organized copy in `FINAL_PATH`.
+
 ## [PR #4] - 2026-04-16 - Ollama Few-Shot Speaker Detection (93% Accuracy)
 
 Improved Ollama speaker detection from ~40% to 93% accuracy using few-shot prompting:
