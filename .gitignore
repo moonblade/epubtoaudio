@@ -38,12 +38,14 @@ output/
 jobs/
 models/*.onnx
 models/*.bin
+voice_mappings/
 
 # Keep directory structure
 !input/.gitkeep
 !output/.gitkeep
 !jobs/.gitkeep
 !models/.gitkeep
+!voice_mappings/.gitkeep
 
 # Testing
 .pytest_cache/

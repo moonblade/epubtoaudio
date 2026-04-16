@@ -10,8 +10,9 @@ JOBS_PATH = BASE_DIR / "jobs"
 MODELS_PATH = BASE_DIR / "models"
 TEMPLATES_PATH = BASE_DIR / "templates"
 STATIC_PATH = BASE_DIR / "static"
+VOICE_MAPPINGS_PATH = BASE_DIR / "voice_mappings"
 
-for path in [UPLOAD_PATH, OUTPUT_PATH, JOBS_PATH, MODELS_PATH]:
+for path in [UPLOAD_PATH, OUTPUT_PATH, JOBS_PATH, MODELS_PATH, VOICE_MAPPINGS_PATH]:
     path.mkdir(parents=True, exist_ok=True)
 
 MODEL_FILE = MODELS_PATH / "kokoro-v1.0.onnx"

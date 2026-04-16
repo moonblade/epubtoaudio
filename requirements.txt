@@ -22,3 +22,6 @@ pydantic>=2.5.0
 beautifulsoup4>=4.12.0
 ebooklib>=0.18
 
+# Optional: Enhanced speaker detection (86-90% accuracy)
+# booknlp>=1.0.7
+

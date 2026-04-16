@@ -1,6 +1,5 @@
+#!/usr/bin/env python3.12
 import asyncio
-import os
-import shutil
 import urllib.request
 from pathlib import Path
 from threading import Event
@@ -17,6 +16,13 @@ from config import MODEL_FILE, VOICES_FILE, MODEL_URL, VOICES_URL, MODELS_PATH
 from models import JobState, JobStatus, LogEvent
 from job_manager import JobManager
 from log_store import LogStore
+from preprocessor import (
+    ExpressivePreprocessor,
+    ProcessedChapter,
+    TextSegment,
+    SegmentType,
+    generate_silence_samples,
+)
 
 
 def download_models() -> bool:
@@ -34,73 +40,26 @@ def download_models() -> bool:
     return True
 
 
-def extract_chapters_from_epub(epub_path: str) -> list[dict[str, str | int]]:
+def extract_chapters_with_html(epub_path: str) -> list[dict]:
     book = epub.read_epub(epub_path)
     chapters = []
     
     for item in book.get_items():
         if item.get_type() == ITEM_DOCUMENT:
-            soup = BeautifulSoup(item.get_body_content(), "html.parser")
+            html_content = item.get_body_content()
+            soup = BeautifulSoup(html_content, "html.parser")
             text = soup.get_text().strip()
+            
             if len(text) > 50:
                 title_tag = soup.find(["h1", "h2", "h3", "title"])
                 title = title_tag.get_text().strip() if title_tag else f"Chapter {len(chapters) + 1}"
                 chapters.append({
                     "title": title,
-                    "content": text,
+                    "html_content": html_content,
                     "order": len(chapters) + 1
                 })
     
     return chapters
-
-
-def chunk_text(text: str, max_size: int = 1000) -> list[str]:
-    sentences = text.replace('\n', ' ').split('.')
-    chunks = []
-    current_chunk = []
-    current_size = 0
-    
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        sentence = sentence + '.'
-        sentence_size = len(sentence)
-        
-        if sentence_size > max_size:
-            if current_chunk:
-                chunks.append(' '.join(current_chunk))
-                current_chunk = []
-                current_size = 0
-            
-            words = sentence.split()
-            piece = []
-            piece_size = 0
-            for word in words:
-                if piece_size + len(word) + 1 > max_size:
-                    if piece:
-                        chunks.append(' '.join(piece))
-                    piece = [word]
-                    piece_size = len(word)
-                else:
-                    piece.append(word)
-                    piece_size += len(word) + 1
-            if piece:
-                chunks.append(' '.join(piece))
-            continue
-        
-        if current_size + sentence_size > max_size and current_chunk:
-            chunks.append(' '.join(current_chunk))
-            current_chunk = []
-            current_size = 0
-        
-        current_chunk.append(sentence)
-        current_size += sentence_size
-    
-    if current_chunk:
-        chunks.append(' '.join(current_chunk))
-    
-    return chunks
 
 
 class ConversionJob:
@@ -110,6 +69,8 @@ class ConversionJob:
         job_manager: JobManager,
         log_queue: asyncio.Queue[LogEvent],
         log_store: LogStore,
+        enable_expressive: bool = True,
+        enable_multi_voice: bool = True,
     ):
         self.job_state = job_state
         self.job_manager = job_manager
@@ -117,6 +78,9 @@ class ConversionJob:
         self.log_store = log_store
         self.should_stop = Event()
         self.kokoro: Optional[Kokoro] = None
+        self.enable_expressive = enable_expressive
+        self.enable_multi_voice = enable_multi_voice
+        self.sample_rate = 24000
 
     def _emit_log(self, level: str, message: str, progress: float = 0.0, chapter: Optional[int] = None, chunk: Optional[int] = None):
         event = LogEvent(
@@ -147,6 +111,82 @@ class ConversionJob:
             self._emit_log("error", f"Failed to initialize Kokoro: {e}")
             return False
 
+    def _synthesize_segment(self, segment: TextSegment, default_voice: str) -> Optional[np.ndarray]:
+        if not segment.text.strip():
+            return None
+        
+        if self.kokoro is None:
+            raise RuntimeError("Kokoro not initialized")
+        
+        voice = segment.voice_override if segment.voice_override else default_voice
+        lang = "en-gb" if voice.startswith("b") else "en-us"
+        
+        samples, sr = self.kokoro.create(
+            segment.text,
+            voice=voice,
+            speed=segment.speed,
+            lang=lang,
+        )
+        self.sample_rate = sr
+        return np.array(samples)
+
+    def _generate_silence(self, duration_seconds: float) -> np.ndarray:
+        return np.array(generate_silence_samples(duration_seconds, self.sample_rate))
+
+    def _process_chapter_expressive(
+        self,
+        chapter: ProcessedChapter,
+        wav_file: sf.SoundFile,
+        default_voice: str,
+        chunk_index: int,
+        total_chunks: int,
+    ) -> int:
+        chunks = self.preprocessor.chunk_segments(chapter.segments)
+        
+        for chunk_segments in chunks:
+            if self.should_stop.is_set():
+                return chunk_index
+            
+            for segment in chunk_segments:
+                if segment.pause_before_seconds > 0:
+                    silence = self._generate_silence(segment.pause_before_seconds)
+                    wav_file.write(silence)
+                
+                if segment.segment_type == SegmentType.SCENE_BREAK:
+                    continue
+                
+                try:
+                    audio = self._synthesize_segment(segment, default_voice)
+                    if audio is not None:
+                        wav_file.write(audio)
+                except Exception as e:
+                    self._emit_log("warning", f"Failed to synthesize segment: {e}")
+                
+                if segment.pause_after_seconds > 0:
+                    silence = self._generate_silence(segment.pause_after_seconds)
+                    wav_file.write(silence)
+            
+            chunk_index += 1
+            progress = (chunk_index / total_chunks) * 100
+            
+            self._emit_log(
+                "info",
+                f"Processing chunk {chunk_index}/{total_chunks} (Chapter {chapter.order})",
+                progress=progress,
+                chapter=chapter.order,
+                chunk=chunk_index,
+            )
+            
+            self.job_manager.update_checkpoint(
+                self.job_state.job_id,
+                chapter.order,
+                chunk_index,
+                self.total_chapters,
+                total_chunks,
+            )
+        
+        return chunk_index
+
     def run(self) -> None:
         job_id = self.job_state.job_id
         output_dir = Path(self.job_state.output_dir)
@@ -160,90 +200,104 @@ class ConversionJob:
             return
         
         try:
-            chapters = extract_chapters_from_epub(self.job_state.epub_path)
-            if not chapters:
+            raw_chapters = extract_chapters_with_html(self.job_state.epub_path)
+            if not raw_chapters:
                 self._emit_log("error", "No chapters found in EPUB")
                 self.job_manager.update_job(job_id, status=JobStatus.FAILED, error="No chapters found")
                 return
             
-            all_chunks = []
-            for chapter in chapters:
-                chapter_chunks = chunk_text(str(chapter["content"]))
-                for chunk in chapter_chunks:
-                    all_chunks.append({"chapter": chapter["order"], "title": chapter["title"], "text": chunk})
+            from voice_mapping_store import VoiceMappingStore
+            voice_store = VoiceMappingStore()
+            book_slug = voice_store.get_book_slug(self.job_state.epub_filename)
+            self._emit_log("info", f"Book: {book_slug}")
             
-            total_chunks = len(all_chunks)
-            self.job_manager.update_checkpoint(job_id, 0, 0, len(chapters), total_chunks)
-            self._emit_log("info", f"Found {len(chapters)} chapters, {total_chunks} chunks")
+            self.preprocessor = ExpressivePreprocessor(
+                narrator_voice=self.job_state.voice,
+                enable_speaker_detection=self.enable_expressive,
+                enable_multi_voice=self.enable_multi_voice,
+                use_booknlp=True,
+                book_slug=book_slug,
+            )
+            
+            existing_speakers = self.preprocessor.get_speaker_voice_map()
+            if len(existing_speakers) > 1:
+                self._emit_log("info", f"Loaded {len(existing_speakers) - 1} existing speaker voices")
+            
+            if self.preprocessor.using_booknlp:
+                self._emit_log("info", "Using BookNLP for enhanced speaker detection")
+            else:
+                self._emit_log("info", "Using regex-based speaker detection (install booknlp for better accuracy)")
+            
+            processed_chapters: list[ProcessedChapter] = []
+            total_chunks = 0
+            
+            self._emit_log("info", f"Preprocessing {len(raw_chapters)} chapters...")
+            
+            for raw_chapter in raw_chapters:
+                processed = self.preprocessor.process_chapter_html(
+                    raw_chapter["html_content"],
+                    raw_chapter["title"],
+                    raw_chapter["order"],
+                )
+                processed_chapters.append(processed)
+                total_chunks += len(self.preprocessor.chunk_segments(processed.segments))
+            
+            self.total_chapters = len(processed_chapters)
+            self.job_manager.update_checkpoint(job_id, 0, 0, self.total_chapters, total_chunks)
+            
+            speaker_map = self.preprocessor.get_speaker_voice_map()
+            if len(speaker_map) > 1:
+                speaker_list = ", ".join(f"{s}: {v}" for s, v in speaker_map.items() if s != "NARRATOR")
+                self._emit_log("info", f"Detected speakers: {speaker_list}")
+            
+            self._emit_log("info", f"Found {self.total_chapters} chapters, {total_chunks} chunks")
             
             start_chunk = self.job_state.current_chunk
-            sample_rate = 24000
-            current_chapter = 0
-            chapter_wav_file: Optional[sf.SoundFile] = None
+            chunk_index = 0
             
-            for i, chunk_data in enumerate(all_chunks):
-                if i < start_chunk:
-                    continue
-                
+            for chapter in processed_chapters:
                 if self.should_stop.is_set():
-                    if chapter_wav_file:
-                        chapter_wav_file.close()
                     self._emit_log("info", "Conversion paused")
                     self.job_manager.update_job(job_id, status=JobStatus.PAUSED)
                     return
                 
-                chapter_num = chunk_data["chapter"]
-                progress = ((i + 1) / total_chunks) * 100
+                chapter_wav_path = output_dir / f"chapter_{chapter.order:03d}.wav"
+                chapter_mp3_path = output_dir / f"chapter_{chapter.order:03d}.mp3"
                 
-                if chapter_num != current_chapter:
-                    if chapter_wav_file:
-                        chapter_wav_file.close()
-                        chapter_wav_path = output_dir / f"chapter_{current_chapter:03d}.wav"
-                        chapter_mp3_path = output_dir / f"chapter_{current_chapter:03d}.mp3"
-                        AudioSegment.from_wav(str(chapter_wav_path)).export(str(chapter_mp3_path), format="mp3", bitrate="192k")
-                        chapter_wav_path.unlink()
-                        self._emit_log("info", f"Saved {chapter_mp3_path.name}")
-                    
-                    current_chapter = chapter_num
-                    chapter_wav_path = output_dir / f"chapter_{chapter_num:03d}.wav"
-                    chapter_wav_file = sf.SoundFile(str(chapter_wav_path), mode='w', samplerate=sample_rate, channels=1)
+                chunks_in_chapter = len(self.preprocessor.chunk_segments(chapter.segments))
                 
-                self._emit_log(
-                    "info",
-                    f"Processing chunk {i + 1}/{total_chunks} (Chapter {chapter_num})",
-                    progress=progress,
-                    chapter=chapter_num,
-                    chunk=i + 1,
-                )
+                if chunk_index + chunks_in_chapter <= start_chunk:
+                    chunk_index += chunks_in_chapter
+                    continue
                 
-                try:
-                    voice = self.job_state.voice
-                    lang = "en-gb" if voice.startswith("b") else "en-us"
-                    if self.kokoro is None:
-                        raise RuntimeError("Kokoro not initialized")
-                    samples, sr = self.kokoro.create(
-                        chunk_data["text"],
-                        voice=voice,
-                        speed=1.0,
-                        lang=lang,
+                with sf.SoundFile(str(chapter_wav_path), mode='w', samplerate=self.sample_rate, channels=1) as wav_file:
+                    chunk_index = self._process_chapter_expressive(
+                        chapter,
+                        wav_file,
+                        self.job_state.voice,
+                        chunk_index,
+                        total_chunks,
                     )
-                    sample_rate = sr
-                    
-                    if chapter_wav_file:
-                        chapter_wav_file.write(np.array(samples))
-                    
-                except Exception as e:
-                    self._emit_log("warning", f"Failed to process chunk {i + 1}: {e}")
                 
-                self.job_manager.update_checkpoint(job_id, chapter_num, i + 1, len(chapters), total_chunks)
-            
-            if chapter_wav_file:
-                chapter_wav_file.close()
-                chapter_wav_path = output_dir / f"chapter_{current_chapter:03d}.wav"
-                chapter_mp3_path = output_dir / f"chapter_{current_chapter:03d}.mp3"
-                AudioSegment.from_wav(str(chapter_wav_path)).export(str(chapter_mp3_path), format="mp3", bitrate="192k")
+                if self.should_stop.is_set():
+                    if chapter_wav_path.exists():
+                        chapter_wav_path.unlink()
+                    self._emit_log("info", "Conversion paused")
+                    self.job_manager.update_job(job_id, status=JobStatus.PAUSED)
+                    return
+                
+                AudioSegment.from_wav(str(chapter_wav_path)).export(
+                    str(chapter_mp3_path),
+                    format="mp3",
+                    bitrate="192k"
+                )
                 chapter_wav_path.unlink()
                 self._emit_log("info", f"Saved {chapter_mp3_path.name}")
+            
+            self.preprocessor.save_voice_mappings()
+            speaker_map = self.preprocessor.get_speaker_voice_map()
+            if len(speaker_map) > 1:
+                self._emit_log("info", f"Saved voice mappings for {len(speaker_map) - 1} speakers")
             
             self.job_manager.update_job(job_id, status=JobStatus.COMPLETED, progress=100.0)
             self._emit_log("info", "Conversion completed!", progress=100.0)
