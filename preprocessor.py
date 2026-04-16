@@ -131,6 +131,20 @@ PRONOUNS = frozenset([
     "himself", "herself", "themselves", "itself", "myself", "ourselves", "yourself",
 ])
 
+NON_SPEAKER_WORDS = frozenset([
+    "more", "less", "much", "many", "some", "any", "all", "none", "most", "few",
+    "something", "nothing", "everything", "anything", "someone", "anyone", "everyone",
+    "somewhere", "anywhere", "everywhere", "nowhere",
+    "now", "then", "here", "there", "where", "when", "how", "why", "what", "which",
+    "yes", "no", "maybe", "perhaps", "probably", "certainly", "definitely",
+    "just", "only", "even", "still", "already", "always", "never", "often", "sometimes",
+    "very", "quite", "rather", "too", "enough", "almost", "nearly", "really", "actually",
+    "again", "also", "anyway", "besides", "finally", "further", "however", "instead",
+    "meanwhile", "moreover", "nevertheless", "otherwise", "therefore", "thus",
+    "before", "after", "during", "while", "until", "since", "because", "although",
+    "the", "a", "an", "this", "that", "these", "those",
+])
+
 
 PITCH_SHIFTS_FEMALE = [1.5, 2.5, 1.0, 3.0, 2.0]
 PITCH_SHIFTS_MALE = [-1.0, -2.0, -1.5, -0.5, -2.5]
@@ -357,8 +371,10 @@ class ExpressivePreprocessor:
         match = self._speaker_attribution_pattern.search(context)
         if match:
             speaker = match.group("speaker1") or match.group("speaker2")
-            if speaker and speaker.lower() not in PRONOUNS:
-                return speaker
+            if speaker:
+                speaker_lower = speaker.lower()
+                if speaker_lower not in PRONOUNS and speaker_lower not in NON_SPEAKER_WORDS:
+                    return speaker
         return None
 
     def _extract_italicized_text(self, element: Tag) -> set[str]:
