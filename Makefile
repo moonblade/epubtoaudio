@@ -1,4 +1,4 @@
-.PHONY: setup run install clean download-models test lint logs samples test-ollama
+.PHONY: setup run stop install clean download-models test lint logs samples test-ollama
 
 PYTHON := python3.12
 VENV := .venv
@@ -32,6 +32,10 @@ download-models:
 
 run: setup
 	EPUBTOAUDIO_BROWSE_PATH=$(HOME)/Downloads $(BIN)/uvicorn main:app --reload --host 0.0.0.0 --port $(PORT)
+
+stop:
+	@lsof -ti tcp:$(PORT) | xargs -r kill -9 2>/dev/null || true
+	@echo "Stopped processes on port $(PORT)"
 
 samples: setup
 	$(BIN)/python generate_samples.py
