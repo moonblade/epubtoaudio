@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [PR #6] - 2026-04-17 - Reduced Pause Timing & Preprocessing Debug API
+
+Significantly reduced pause/silence durations and added a new `/preprocess` endpoint for debugging.
+
+#### Pause Timing Changes (~50% reduction)
+| Pause Type | Before | After |
+|------------|--------|-------|
+| Sentence | 0.7s | 0.3s |
+| Paragraph | 1.5s | 0.6s |
+| Section break | 2.7s | 1.2s |
+| Chapter boundary | 3.5s | 1.5s |
+| Dialogue start | 0.3s | 0.15s |
+| Dialogue end | 0.4s | 0.2s |
+| Thought start/end | 0.5s | 0.25s |
+
+#### New `/preprocess` Endpoint
+Debug endpoint to inspect preprocessing output before TTS conversion:
+- `POST /preprocess` - Upload EPUB and get preprocessed segments as JSON
+- Optional `chapter` query param to process a single chapter
+- Returns: chapters with segments (text, type, speaker, pauses, speed, pitch)
+
+#### Files Changed
+- `preprocessor.py`: Updated `PAUSE_SECONDS` values
+- `models.py`: Added `SegmentResponse`, `ChapterResponse`, `PreprocessResponse`
+- `main.py`: Added `/preprocess` endpoint
+- `README.md`: Updated prosody control table
+
 ## [PR #5] - 2026-04-17 - Final Output Path Configuration
 
 Added option to copy completed audiobooks to a separate final output directory with the book name as the folder.

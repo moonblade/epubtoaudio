@@ -13,9 +13,10 @@ from sse_starlette.sse import EventSourceResponse
 from starlette.requests import Request
 
 from config import UPLOAD_PATH, OUTPUT_PATH, JOBS_PATH, TEMPLATES_PATH, STATIC_PATH, DEFAULT_VOICE
-from models import JobStatus, JobResponse, UploadResponse, VoiceOption, VOICE_DISPLAY_NAMES, LogEvent
+from models import JobStatus, JobResponse, UploadResponse, VoiceOption, VOICE_DISPLAY_NAMES, LogEvent, PreprocessResponse, ChapterResponse, SegmentResponse
 from job_manager import JobManager
-from converter import ConversionJob
+from converter import ConversionJob, extract_chapters_with_html
+from preprocessor import ExpressivePreprocessor
 from log_store import LogStore
 from logger import logger
 
@@ -307,6 +308,87 @@ async def download_chapter_audio(job_id: str, chapter: int):
 @app.get("/voices")
 async def list_voices():
     return VOICE_DISPLAY_NAMES
+
+
+@app.post("/preprocess", response_model=PreprocessResponse)
+async def preprocess_epub(
+    file: UploadFile = File(...),
+    voice: str = Form(default=DEFAULT_VOICE),
+    chapter: Optional[int] = Query(default=None, description="Process only this chapter (1-indexed)"),
+):
+    if not file.filename.lower().endswith(".epub"):
+        raise HTTPException(status_code=400, detail="Only EPUB files are allowed")
+
+    try:
+        VoiceOption(voice)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid voice: {voice}")
+
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".epub", delete=False) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        raw_chapters = extract_chapters_with_html(tmp_path)
+
+        if chapter is not None:
+            if chapter < 1 or chapter > len(raw_chapters):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Chapter {chapter} not found. Book has {len(raw_chapters)} chapters."
+                )
+            raw_chapters = [raw_chapters[chapter - 1]]
+
+        preprocessor = ExpressivePreprocessor(
+            narrator_voice=voice,
+            enable_speaker_detection=False,
+            use_booknlp=False,
+        )
+
+        chapters_response = []
+        for raw in raw_chapters:
+            processed = preprocessor.process_chapter_html(
+                raw["html_content"],
+                raw["title"],
+                raw["order"],
+            )
+
+            speakers_in_chapter = list({
+                seg.speaker for seg in processed.segments if seg.speaker
+            })
+
+            segments = [
+                SegmentResponse(
+                    text=seg.text,
+                    segment_type=seg.segment_type.value,
+                    speaker=seg.speaker,
+                    pause_before_seconds=seg.pause_before_seconds,
+                    pause_after_seconds=seg.pause_after_seconds,
+                    speed=seg.speed,
+                    pitch_shift=seg.pitch_shift,
+                )
+                for seg in processed.segments
+            ]
+
+            chapters_response.append(ChapterResponse(
+                title=processed.title,
+                order=processed.order,
+                segment_count=len(segments),
+                speakers=speakers_in_chapter,
+                segments=segments,
+            ))
+
+        return PreprocessResponse(
+            filename=file.filename,
+            total_chapters=len(raw_chapters) if chapter is None else len(extract_chapters_with_html(tmp_path)),
+            chapters=chapters_response,
+            speaker_pitch_map=preprocessor.get_speaker_pitch_map(),
+        )
+    finally:
+        import os
+        os.unlink(tmp_path)
 
 
 if __name__ == "__main__":

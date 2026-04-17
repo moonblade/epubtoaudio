@@ -39,14 +39,14 @@ class ProcessedChapter:
 
 
 PAUSE_SECONDS = {
-    "sentence": 0.7,
-    "paragraph": 1.5,
-    "section_break": 2.7,
-    "chapter_boundary": 3.5,
-    "dialogue_start": 0.3,
-    "dialogue_end": 0.4,
-    "thought_start": 0.5,
-    "thought_end": 0.5,
+    "sentence": 0.3,
+    "paragraph": 0.6,
+    "section_break": 1.2,
+    "chapter_boundary": 1.5,
+    "dialogue_start": 0.15,
+    "dialogue_end": 0.2,
+    "thought_start": 0.25,
+    "thought_end": 0.25,
 }
 
 SPEED_BY_SEGMENT_TYPE = {

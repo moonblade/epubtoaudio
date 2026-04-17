@@ -119,3 +119,28 @@ class LogEvent(BaseModel):
     progress: float = 0.0
     chapter: Optional[int] = None
     chunk: Optional[int] = None
+
+
+class SegmentResponse(BaseModel):
+    text: str
+    segment_type: str
+    speaker: Optional[str] = None
+    pause_before_seconds: float
+    pause_after_seconds: float
+    speed: float
+    pitch_shift: float
+
+
+class ChapterResponse(BaseModel):
+    title: str
+    order: int
+    segment_count: int
+    speakers: list[str]
+    segments: list[SegmentResponse]
+
+
+class PreprocessResponse(BaseModel):
+    filename: str
+    total_chapters: int
+    chapters: list[ChapterResponse]
+    speaker_pitch_map: dict[str, float]

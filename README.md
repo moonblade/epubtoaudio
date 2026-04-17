@@ -40,12 +40,12 @@ Most EPUB-to-audio tools produce monotonous, robotic narration. This converter c
 ### Prosody Control
 | Content Type | Speed | Pause After |
 |-------------|-------|-------------|
-| Narration | 1.0x | 0.7s |
-| Dialogue | 1.05x | 0.4s |
-| Internal thoughts | 0.92x | 0.5s |
-| Chapter start | 0.95x | 3.5s |
-| Scene break | — | 2.7s |
-| Paragraph | — | 1.5s |
+| Narration | 1.0x | 0.3s |
+| Dialogue | 1.05x | 0.2s |
+| Internal thoughts | 0.92x | 0.25s |
+| Chapter start | 0.95x | 1.5s |
+| Scene break | — | 1.2s |
+| Paragraph | — | 0.6s |
 
 ---
 
