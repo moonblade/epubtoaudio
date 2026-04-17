@@ -62,12 +62,20 @@
 
         {% if job.status == 'completed' %}
         <section class="chapters-section">
-            <h2>Download Chapters</h2>
-            <div class="chapters-grid">
+            <h2>Chapters</h2>
+            <div class="m4b-download">
+                <a href="/jobs/{{ job.job_id }}/audiobook" class="btn btn-m4b">📖 Download Full Audiobook (M4B)</a>
+            </div>
+            <div class="chapters-list">
                 {% for i in range(1, job.total_chapters + 1) %}
-                <a href="/jobs/{{ job.job_id }}/audio/{{ i }}" class="chapter-link">
-                    Chapter {{ i }}
-                </a>
+                <div class="chapter-row">
+                    <span class="chapter-label">Chapter {{ i }}</span>
+                    <div class="chapter-actions">
+                        <button class="btn-play" onclick="togglePlay(this, '/jobs/{{ job.job_id }}/audio/{{ i }}')">▶️ Play</button>
+                        <a href="/jobs/{{ job.job_id }}/audio/{{ i }}" class="btn-dl">⬇ Download</a>
+                    </div>
+                    <audio class="chapter-audio" preload="none"></audio>
+                </div>
                 {% endfor %}
             </div>
         </section>
@@ -157,6 +165,43 @@
         });
 
         connectSSE();
+
+        let currentAudio = null;
+
+        function togglePlay(btn, src) {
+            const row = btn.closest('.chapter-row');
+            const audio = row.querySelector('.chapter-audio');
+
+            if (currentAudio && currentAudio !== audio) {
+                currentAudio.pause();
+                currentAudio.closest('.chapter-row').classList.remove('active');
+                currentAudio.closest('.chapter-row').querySelector('.btn-play').textContent = '▶️ Play';
+                currentAudio.closest('.chapter-row').querySelector('.btn-play').classList.remove('playing');
+            }
+
+            if (audio.paused || audio.ended) {
+                if (!audio.src || audio.src === window.location.href) {
+                    audio.src = src;
+                }
+                audio.play();
+                btn.textContent = '⏸️ Pause';
+                btn.classList.add('playing');
+                row.classList.add('active');
+                audio.controls = true;
+                currentAudio = audio;
+            } else {
+                audio.pause();
+                btn.textContent = '▶️ Play';
+                btn.classList.remove('playing');
+                row.classList.remove('active');
+            }
+
+            audio.onended = () => {
+                btn.textContent = '▶️ Play';
+                btn.classList.remove('playing');
+                row.classList.remove('active');
+            };
+        }
     </script>
 </body>
 </html>

@@ -441,6 +441,104 @@ header p {
     transform: translateY(-2px);
 }
 
+.chapters-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
+
+.chapter-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 1rem;
+    background: rgba(255,255,255,0.03);
+    border-radius: 8px;
+}
+
+.chapter-label {
+    font-weight: 500;
+    min-width: 100px;
+}
+
+.chapter-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-left: auto;
+}
+
+.btn-play, .btn-dl {
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.2s ease;
+}
+
+.btn-play {
+    background: rgba(74, 222, 128, 0.15);
+    color: #4ade80;
+}
+
+.btn-play:hover {
+    background: rgba(74, 222, 128, 0.25);
+}
+
+.btn-play.playing {
+    background: rgba(251, 191, 36, 0.15);
+    color: #fbbf24;
+}
+
+.btn-dl {
+    background: rgba(74, 158, 255, 0.15);
+    color: #4a9eff;
+}
+
+.btn-dl:hover {
+    background: rgba(74, 158, 255, 0.25);
+}
+
+.chapter-audio {
+    display: none;
+}
+
+.chapter-row.active .chapter-audio {
+    display: block;
+    width: 100%;
+    margin-top: 0.5rem;
+    height: 36px;
+}
+
+.chapter-row.active {
+    flex-wrap: wrap;
+}
+
+.m4b-download {
+    margin-bottom: 1rem;
+}
+
+.btn-m4b {
+    background: linear-gradient(135deg, rgba(74, 222, 128, 0.2), rgba(74, 158, 255, 0.2));
+    color: #4ade80;
+    padding: 0.75rem 1.5rem;
+    border-radius: 8px;
+    text-decoration: none;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: all 0.2s ease;
+}
+
+.btn-m4b:hover {
+    background: linear-gradient(135deg, rgba(74, 222, 128, 0.3), rgba(74, 158, 255, 0.3));
+    transform: translateY(-2px);
+}
+
 @media (max-width: 600px) {
     .container {
         padding: 1rem;
