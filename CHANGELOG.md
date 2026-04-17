@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [PR #6] - 2026-04-17 - Browse Files from Mounted Directory
+
+Added ability to browse and convert EPUB files from a mounted directory instead of uploading.
+
+#### New Features
+- **Browse tab in UI**: Switch between Upload and Browse tabs
+- **Directory navigation**: Navigate through folders to find EPUB files
+- **Direct conversion**: Select files from browse and convert without uploading
+
+#### New Endpoints
+- `GET /browse?path=` - List EPUB files and directories at path
+- `POST /convert-from-browse` - Start conversion from a browsed file path
+
+#### Configuration
+- **New env var**: `EPUBTOAUDIO_BROWSE_PATH` - Mount a directory for browsing (e.g., webtoepub output)
+
+#### Files Changed
+- `config.py`: Added `BROWSE_PATH` configuration
+- `models.py`: Added `BrowseFile`, `BrowseResponse` models
+- `main.py`: Added `/browse` and `/convert-from-browse` endpoints
+- `templates/index.html`: Added tabbed UI with browse functionality
+
 ## [PR #6] - 2026-04-17 - Reduced Pause Timing & Preprocessing Debug API
 
 Significantly reduced pause/silence durations and added a new `/preprocess` endpoint for debugging.

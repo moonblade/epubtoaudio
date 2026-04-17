@@ -12,8 +12,8 @@ from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 from starlette.requests import Request
 
-from config import UPLOAD_PATH, OUTPUT_PATH, JOBS_PATH, TEMPLATES_PATH, STATIC_PATH, DEFAULT_VOICE
-from models import JobStatus, JobResponse, UploadResponse, VoiceOption, VOICE_DISPLAY_NAMES, LogEvent, PreprocessResponse, ChapterResponse, SegmentResponse
+from config import UPLOAD_PATH, OUTPUT_PATH, JOBS_PATH, TEMPLATES_PATH, STATIC_PATH, DEFAULT_VOICE, BROWSE_PATH
+from models import JobStatus, JobResponse, UploadResponse, VoiceOption, VOICE_DISPLAY_NAMES, LogEvent, PreprocessResponse, ChapterResponse, SegmentResponse, BrowseResponse, BrowseFile
 from job_manager import JobManager
 from converter import ConversionJob, extract_chapters_with_html
 from preprocessor import ExpressivePreprocessor
@@ -389,6 +389,103 @@ async def preprocess_epub(
     finally:
         import os
         os.unlink(tmp_path)
+
+
+@app.get("/browse", response_model=BrowseResponse)
+async def browse_files(path: str = Query(default="")):
+    if not BROWSE_PATH:
+        return BrowseResponse(enabled=False, current_path="", files=[], directories=[])
+
+    browse_root = Path(BROWSE_PATH)
+    if not browse_root.exists():
+        raise HTTPException(status_code=500, detail="Browse path not configured or does not exist")
+
+    current_path = browse_root / path if path else browse_root
+    if not current_path.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+
+    if not str(current_path.resolve()).startswith(str(browse_root.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    files = []
+    directories = []
+
+    for item in sorted(current_path.iterdir()):
+        if item.is_dir():
+            directories.append(item.name)
+        elif item.suffix.lower() == ".epub":
+            stat = item.stat()
+            from datetime import datetime
+            files.append(BrowseFile(
+                name=item.name,
+                path=str(item.relative_to(browse_root)),
+                size=stat.st_size,
+                modified=datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            ))
+
+    return BrowseResponse(
+        enabled=True,
+        current_path=path,
+        files=files,
+        directories=directories,
+    )
+
+
+@app.post("/convert-from-browse", response_model=UploadResponse)
+async def convert_from_browse(
+    file_path: str = Form(...),
+    voice: str = Form(default=DEFAULT_VOICE),
+    output_path: Optional[str] = Form(default=None),
+):
+    if not BROWSE_PATH:
+        raise HTTPException(status_code=400, detail="Browse feature not enabled")
+
+    try:
+        VoiceOption(voice)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid voice: {voice}")
+
+    browse_root = Path(BROWSE_PATH)
+    epub_path = browse_root / file_path
+
+    if not str(epub_path.resolve()).startswith(str(browse_root.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if not epub_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if not epub_path.suffix.lower() == ".epub":
+        raise HTTPException(status_code=400, detail="Only EPUB files are allowed")
+
+    _, op = get_paths(None, output_path)
+
+    job_id = str(uuid.uuid4())[:8]
+    output_dir = op / job_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    job_state = job_manager.create_job(
+        job_id=job_id,
+        epub_path=str(epub_path),
+        epub_filename=epub_path.name,
+        output_dir=str(output_dir),
+        voice=voice,
+    )
+
+    logger.info(f"Created job {job_id} for {epub_path.name} (from browse) with voice {voice}")
+
+    log_queue: asyncio.Queue[LogEvent] = asyncio.Queue(maxsize=1000)
+    log_queues[job_id] = log_queue
+
+    conversion_job = ConversionJob(job_state, job_manager, log_queue, log_store)
+    active_jobs[job_id] = conversion_job
+
+    executor.submit(lambda: conversion_job.run())
+
+    return UploadResponse(
+        job_id=job_id,
+        status="started",
+        message=f"Conversion started for {epub_path.name}",
+    )
 
 
 if __name__ == "__main__":

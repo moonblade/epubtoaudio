@@ -6,6 +6,7 @@ BASE_DIR = Path(__file__).parent
 UPLOAD_PATH = Path(os.getenv("EPUBTOAUDIO_UPLOAD_PATH", str(BASE_DIR / "input")))
 OUTPUT_PATH = Path(os.getenv("EPUBTOAUDIO_OUTPUT_PATH", str(BASE_DIR / "output")))
 FINAL_PATH = os.getenv("EPUBTOAUDIO_FINAL_PATH", "")  # Optional: copy completed audiobooks here
+BROWSE_PATH = os.getenv("EPUBTOAUDIO_BROWSE_PATH", "")  # Optional: browse EPUB files from this path
 
 JOBS_PATH = BASE_DIR / "jobs"
 MODELS_PATH = BASE_DIR / "models"

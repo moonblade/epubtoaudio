@@ -144,3 +144,17 @@ class PreprocessResponse(BaseModel):
     total_chapters: int
     chapters: list[ChapterResponse]
     speaker_pitch_map: dict[str, float]
+
+
+class BrowseFile(BaseModel):
+    name: str
+    path: str
+    size: int
+    modified: str
+
+
+class BrowseResponse(BaseModel):
+    enabled: bool
+    current_path: str
+    files: list[BrowseFile]
+    directories: list[str]
