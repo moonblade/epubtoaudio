@@ -40,13 +40,18 @@ class ProcessedChapter:
 
 PAUSE_SECONDS = {
     "sentence": 0.3,
-    "paragraph": 0.6,
+    "paragraph": 0.5,
     "section_break": 1.2,
     "chapter_boundary": 1.5,
-    "dialogue_start": 0.15,
-    "dialogue_end": 0.2,
-    "thought_start": 0.25,
-    "thought_end": 0.25,
+    "dialogue_start": 0.1,
+    "dialogue_end": 0.15,
+    "thought_start": 0.2,
+    "thought_end": 0.2,
+    "attribution_end": 0.1,
+    "exclamation": 0.15,
+    "question": 0.12,
+    "ellipsis": 0.3,
+    "em_dash": 0.1,
 }
 
 SPEED_BY_SEGMENT_TYPE = {
@@ -693,6 +698,91 @@ class ExpressivePreprocessor:
             pitch_shift=pitch_shift,
         )
 
+    def _split_punctuation(self, segments: list[TextSegment]) -> list[TextSegment]:
+        result: list[TextSegment] = []
+        split_pattern = re.compile(r'(?<=[!?])(?:\s+)(?=[A-Z])')
+        
+        for seg in segments:
+            if seg.segment_type not in (SegmentType.DIALOGUE, SegmentType.NARRATION):
+                result.append(seg)
+                continue
+            
+            text = seg.text
+            has_emphatic = re.search(r'[!?]{2,}|\.\.\.|\u2026|\u2014', text)
+            has_sentence_break = split_pattern.search(text)
+            
+            if not has_emphatic and not has_sentence_break:
+                result.append(seg)
+                continue
+            
+            if '...' in text or '\u2026' in text:
+                seg.pause_after_seconds = max(seg.pause_after_seconds, PAUSE_SECONDS["ellipsis"])
+            if '\u2014' in text:
+                seg.pause_after_seconds = max(seg.pause_after_seconds, PAUSE_SECONDS["em_dash"])
+            
+            parts = split_pattern.split(text)
+            if len(parts) <= 1:
+                result.append(seg)
+                continue
+            
+            for j, part in enumerate(parts):
+                part = part.strip()
+                if not part:
+                    continue
+                pause_after = seg.pause_after_seconds if j == len(parts) - 1 else 0.0
+                if re.search(r'[!]{2,}', part):
+                    pause_after = max(pause_after, PAUSE_SECONDS["exclamation"])
+                elif part.endswith('!'):
+                    pause_after = max(pause_after, PAUSE_SECONDS["exclamation"])
+                elif part.endswith('?'):
+                    pause_after = max(pause_after, PAUSE_SECONDS["question"])
+                
+                result.append(TextSegment(
+                    text=part,
+                    segment_type=seg.segment_type,
+                    speaker=seg.speaker,
+                    pause_before_seconds=seg.pause_before_seconds if j == 0 else 0.0,
+                    pause_after_seconds=pause_after,
+                    speed=seg.speed,
+                    pitch_shift=seg.pitch_shift,
+                ))
+        
+        return result
+
+    def _split_attribution(self, text: str, thought_texts: set[str]) -> list[TextSegment]:
+        verbs = "|".join(SPEECH_VERBS)
+        pattern = rf'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+(?:{verbs})[^.!?]*[.!?])\s+'
+        match = re.match(pattern, text, re.IGNORECASE)
+        if match:
+            attribution = match.group(1).strip()
+            remainder = text[match.end():].strip()
+            segments = [TextSegment(
+                text=attribution,
+                segment_type=SegmentType.NARRATION,
+                pause_after_seconds=PAUSE_SECONDS["attribution_end"],
+                speed=SPEED_BY_SEGMENT_TYPE[SegmentType.NARRATION],
+            )]
+            if remainder:
+                segments.extend(self._split_by_thoughts(remainder, thought_texts))
+            return segments
+        
+        pattern_inv = rf'^(?:{verbs})\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?[^.!?]*[.!?]\s+'
+        match_inv = re.match(pattern_inv, text, re.IGNORECASE)
+        if match_inv:
+            attribution = text[:match_inv.end()].strip()
+            remainder = text[match_inv.end():].strip()
+            segments = [TextSegment(
+                text=attribution,
+                segment_type=SegmentType.NARRATION,
+                pause_after_seconds=PAUSE_SECONDS["attribution_end"],
+                speed=SPEED_BY_SEGMENT_TYPE[SegmentType.NARRATION],
+            )]
+            if remainder:
+                segments.extend(self._split_by_thoughts(remainder, thought_texts))
+            return segments
+        
+        return self._split_by_thoughts(text, thought_texts)
+
     def _split_by_thoughts(self, text: str, thought_texts: set[str]) -> list[TextSegment]:
         if not thought_texts or not text:
             return [self._create_narration_segment(text)] if text else []
@@ -740,7 +830,11 @@ class ExpressivePreprocessor:
             if start > last_end:
                 narration = full_text[last_end:start].strip()
                 if narration:
-                    segments.extend(self._split_by_thoughts(narration, thought_texts))
+                    after_dialogue = len(segments) > 0 and segments[-1].segment_type == SegmentType.DIALOGUE
+                    if after_dialogue:
+                        segments.extend(self._split_attribution(narration, thought_texts))
+                    else:
+                        segments.extend(self._split_by_thoughts(narration, thought_texts))
 
             speaker = None
             context_before = full_text[max(0, start - 200):start]
@@ -768,7 +862,11 @@ class ExpressivePreprocessor:
         if last_end < len(full_text):
             remaining = full_text[last_end:].strip()
             if remaining:
-                segments.extend(self._split_by_thoughts(remaining, thought_texts))
+                after_dialogue = len(segments) > 0 and segments[-1].segment_type == SegmentType.DIALOGUE
+                if after_dialogue:
+                    segments.extend(self._split_attribution(remaining, thought_texts))
+                else:
+                    segments.extend(self._split_by_thoughts(remaining, thought_texts))
 
         if not segments:
             segments = self._split_by_thoughts(full_text.strip(), thought_texts)
@@ -806,18 +904,19 @@ class ExpressivePreprocessor:
 
             element_segments = self._parse_paragraph(element, booknlp_attributions)
 
-            for seg in element_segments:
+            for i, seg in enumerate(element_segments):
                 if seg.segment_type == SegmentType.SCENE_BREAK:
                     if previous_was_scene_break:
                         continue
                     previous_was_scene_break = True
                 else:
-                    if chapter.segments and chapter.segments[-1].segment_type != SegmentType.SCENE_BREAK:
+                    if i == 0 and chapter.segments and chapter.segments[-1].segment_type != SegmentType.SCENE_BREAK:
                         seg.pause_before_seconds = max(seg.pause_before_seconds, PAUSE_SECONDS["paragraph"])
                     previous_was_scene_break = False
 
                 chapter.segments.append(seg)
 
+        chapter.segments = self._split_punctuation(chapter.segments)
         return chapter
 
     def chunk_segments(self, segments: list[TextSegment], max_chars: int = 1000) -> list[list[TextSegment]]:

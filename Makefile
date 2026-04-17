@@ -31,7 +31,7 @@ download-models:
 	@echo "Models ready."
 
 run: setup
-	$(BIN)/uvicorn main:app --reload --host 0.0.0.0 --port $(PORT)
+	EPUBTOAUDIO_BROWSE_PATH=$(HOME)/Downloads $(BIN)/uvicorn main:app --reload --host 0.0.0.0 --port $(PORT)
 
 samples: setup
 	$(BIN)/python generate_samples.py
