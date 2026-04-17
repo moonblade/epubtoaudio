@@ -966,6 +966,7 @@ class ExpressivePreprocessor:
         if self._booknlp_detector:
             booknlp_attributions = self._booknlp_detector.extract_speaker_attributions(full_chapter_text)
 
+        title_normalized = re.sub(r'\s+', ' ', title.strip().lower())
         block_elements = soup.find_all(["p", "div", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6"])
         previous_was_scene_break = False
 
@@ -973,6 +974,11 @@ class ExpressivePreprocessor:
             text = element.get_text().strip()
             if not text or (len(text) < 10 and element.name in ("div", "p")):
                 continue
+
+            if element.name in ("h1", "h2", "h3", "h4", "h5", "h6"):
+                heading_normalized = re.sub(r'\s+', ' ', text.lower())
+                if heading_normalized == title_normalized or title_normalized in heading_normalized:
+                    continue
 
             element_segments = self._parse_paragraph(element, booknlp_attributions)
 
