@@ -305,6 +305,23 @@ async def download_chapter_audio(job_id: str, chapter: int):
     )
 
 
+@app.get("/jobs/{job_id}/audiobook")
+async def download_m4b(job_id: str):
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    m4b_files = list(Path(job.output_dir).glob("*.m4b"))
+    if not m4b_files:
+        raise HTTPException(status_code=404, detail="M4B audiobook not found")
+    
+    return FileResponse(
+        str(m4b_files[0]),
+        media_type="audio/mp4",
+        filename=m4b_files[0].name,
+    )
+
+
 @app.get("/voices")
 async def list_voices():
     return VOICE_DISPLAY_NAMES

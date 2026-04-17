@@ -1,7 +1,9 @@
 #!/usr/bin/env python3.12
 import asyncio
+import json
 import re
 import shutil
+import subprocess
 import urllib.request
 from pathlib import Path
 from threading import Event
@@ -27,6 +29,10 @@ from preprocessor import (
     pitch_shift_audio,
 )
 
+FADE_MS = 30
+TARGET_LUFS = -16.0
+MIN_CHAPTER_SEGMENTS = 5
+
 
 def download_models() -> bool:
     MODELS_PATH.mkdir(parents=True, exist_ok=True)
@@ -41,6 +47,23 @@ def download_models() -> bool:
                 print(f"Failed to download {file_path.name}: {e}")
                 return False
     return True
+
+
+def clean_chapter_title(title: str) -> str:
+    cleaned = re.sub(r'^\d{4}-\d{2}-\d{2}\s*-\s*', '', title)
+    cleaned = re.sub(r'^.*?\s*-\s*(?=[Cc]hapter\s|[Cc]h\s*\d|[Pp]art\s|[Bb]ook\s)', '', cleaned)
+    cleaned = cleaned.replace('- ', ': ', 1) if '- ' in cleaned else cleaned
+    return cleaned.strip() or title
+
+
+def _is_content_chapter(html_content: bytes) -> bool:
+    soup = BeautifulSoup(html_content, "html.parser")
+    text = soup.get_text().strip()
+    if len(text) < 100:
+        return False
+    block_elements = soup.find_all(["p", "div", "blockquote"])
+    content_blocks = [el for el in block_elements if len(el.get_text().strip()) > 20]
+    return len(content_blocks) >= MIN_CHAPTER_SEGMENTS
 
 
 def extract_chapters_with_html(epub_path: str) -> list[dict]:
@@ -133,10 +156,132 @@ class ConversionJob:
         if segment.pitch_shift != 0:
             audio = pitch_shift_audio(audio, sr, segment.pitch_shift)
         
+        audio = self._apply_fade(audio, sr)
         return audio
 
     def _generate_silence(self, duration_seconds: float) -> np.ndarray:
         return np.array(generate_silence_samples(duration_seconds, self.sample_rate))
+
+    @staticmethod
+    def _apply_fade(audio: np.ndarray, sample_rate: int, fade_ms: int = FADE_MS) -> np.ndarray:
+        fade_samples = int(sample_rate * fade_ms / 1000)
+        if len(audio) < fade_samples * 2:
+            return audio
+        audio = audio.copy()
+        fade_in = np.linspace(0.0, 1.0, fade_samples)
+        fade_out = np.linspace(1.0, 0.0, fade_samples)
+        audio[:fade_samples] *= fade_in
+        audio[-fade_samples:] *= fade_out
+        return audio
+
+    def _normalize_chapter_audio(self, wav_path: Path) -> None:
+        try:
+            result = subprocess.run(
+                ['ffmpeg', '-i', str(wav_path), '-af', 'loudnorm=print_format=json', '-f', 'null', '-'],
+                capture_output=True, text=True, timeout=120,
+            )
+            for line in result.stderr.split('\n'):
+                if 'input_i' in line:
+                    break
+            else:
+                return
+
+            json_start = result.stderr.rfind('{')
+            json_end = result.stderr.rfind('}') + 1
+            if json_start < 0:
+                return
+            stats = json.loads(result.stderr[json_start:json_end])
+
+            normalized_path = wav_path.with_suffix('.norm.wav')
+            subprocess.run(
+                ['ffmpeg', '-y', '-i', str(wav_path), '-af',
+                 f'loudnorm=I={TARGET_LUFS}:TP=-1.5:LRA=11:'
+                 f'measured_I={stats["input_i"]}:'
+                 f'measured_LRA={stats["input_lra"]}:'
+                 f'measured_tp={stats["input_tp"]}:'
+                 f'measured_thresh={stats["input_thresh"]}:'
+                 f'linear=true',
+                 str(normalized_path)],
+                capture_output=True, timeout=120,
+            )
+            if normalized_path.exists():
+                normalized_path.replace(wav_path)
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+            self._emit_log("warning", f"Normalization skipped: {e}")
+
+    def _postprocess_audio(self, mp3_path: Path) -> None:
+        try:
+            processed_path = mp3_path.with_suffix('.proc.mp3')
+            subprocess.run(
+                ['ffmpeg', '-y', '-i', str(mp3_path), '-af',
+                 'acompressor=threshold=-20dB:ratio=3:attack=5:release=50,'
+                 'equalizer=f=120:t=h:w=200:g=2,'
+                 'equalizer=f=3000:t=h:w=2000:g=1.5',
+                 '-b:a', '192k', str(processed_path)],
+                capture_output=True, timeout=120,
+            )
+            if processed_path.exists():
+                processed_path.replace(mp3_path)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            self._emit_log("warning", f"Post-processing skipped: {e}")
+
+    def _generate_m4b(self, output_dir: Path, epub_filename: str) -> None:
+        mp3_files = sorted(output_dir.glob("chapter_*.mp3"))
+        if len(mp3_files) < 1:
+            return
+
+        concat_file = output_dir / "concat.txt"
+        metadata_file = output_dir / "metadata.txt"
+
+        lines = []
+        for mp3 in mp3_files:
+            safe_path = str(mp3).replace("'", "'\\''")
+            lines.append(f"file '{safe_path}'")
+
+        concat_file.write_text('\n'.join(lines))
+
+        metadata_lines = [";FFMETADATA1", f"title={Path(epub_filename).stem}"]
+        offset_ms = 0
+        for i, mp3 in enumerate(mp3_files, 1):
+            try:
+                probe = subprocess.run(
+                    ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                     '-of', 'json', str(mp3)],
+                    capture_output=True, text=True, timeout=30,
+                )
+                duration_s = float(json.loads(probe.stdout)['format']['duration'])
+                duration_ms = int(duration_s * 1000)
+            except (subprocess.TimeoutExpired, KeyError, ValueError, FileNotFoundError):
+                duration_ms = 0
+
+            metadata_lines.extend([
+                "[CHAPTER]", "TIMEBASE=1/1000",
+                f"START={offset_ms}", f"END={offset_ms + duration_ms}",
+                f"title=Chapter {i}",
+            ])
+            offset_ms += duration_ms
+
+        metadata_file.write_text('\n'.join(metadata_lines))
+
+        book_name = Path(epub_filename).stem
+        sanitized = re.sub(r'[<>:"/\\|?*]', '', book_name).strip('. ') or 'audiobook'
+        m4b_path = output_dir / f"{sanitized}.m4b"
+
+        try:
+            subprocess.run(
+                ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
+                 '-i', str(concat_file), '-i', str(metadata_file),
+                 '-map_metadata', '1', '-c:a', 'aac', '-b:a', '128k',
+                 '-movflags', '+faststart', str(m4b_path)],
+                capture_output=True, timeout=600,
+            )
+            if m4b_path.exists():
+                self._emit_log("info", f"Generated {m4b_path.name}")
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            self._emit_log("warning", f"M4B generation skipped: {e}")
+        finally:
+            concat_file.unlink(missing_ok=True)
+            metadata_file.unlink(missing_ok=True)
 
     def _process_chapter_expressive(
         self,
@@ -229,21 +374,32 @@ class ConversionJob:
             
             self.preprocessor = ExpressivePreprocessor(
                 narrator_voice=self.job_state.voice,
-                enable_speaker_detection=False,
+                enable_speaker_detection=True,
                 use_booknlp=False,
                 book_slug=book_slug,
             )
             
-            self._emit_log("info", "Dialogue detection enabled (speaker attribution disabled)")
+            self._emit_log("info", "Speaker detection enabled")
             
+            content_chapters = [ch for ch in raw_chapters if _is_content_chapter(ch["html_content"])]
+            if not content_chapters:
+                content_chapters = raw_chapters
+            skipped = len(raw_chapters) - len(content_chapters)
+            if skipped:
+                self._emit_log("info", f"Skipped {skipped} title/metadata-only chapter(s)")
+
+            for idx, ch in enumerate(content_chapters, 1):
+                ch["order"] = idx
+                ch["title"] = clean_chapter_title(ch["title"])
+
             processed_chapters: list[ProcessedChapter] = []
             total_chunks = 0
             
-            self._emit_log("info", f"Preprocessing {len(raw_chapters)} chapters...")
+            self._emit_log("info", f"Preprocessing {len(content_chapters)} chapters...")
             
-            for i, raw_chapter in enumerate(raw_chapters, 1):
+            for i, raw_chapter in enumerate(content_chapters, 1):
                 chapter_title = raw_chapter.get("title", f"Chapter {i}")
-                self._emit_log("info", f"Preprocessing chapter {i}/{len(raw_chapters)}: {chapter_title}")
+                self._emit_log("info", f"Preprocessing chapter {i}/{len(content_chapters)}: {chapter_title}")
                 
                 if self.preprocessor.using_booknlp:
                     self._emit_log("info", f"  Running BookNLP speaker detection...")
@@ -308,18 +464,27 @@ class ConversionJob:
                     self.job_manager.update_job(job_id, status=JobStatus.PAUSED)
                     return
                 
+                self._emit_log("info", f"Normalizing audio for chapter {chapter.order}...")
+                self._normalize_chapter_audio(chapter_wav_path)
+                
                 AudioSegment.from_wav(str(chapter_wav_path)).export(
                     str(chapter_mp3_path),
                     format="mp3",
                     bitrate="192k"
                 )
                 chapter_wav_path.unlink()
+                
+                self._emit_log("info", f"Post-processing chapter {chapter.order}...")
+                self._postprocess_audio(chapter_mp3_path)
                 self._emit_log("info", f"Saved {chapter_mp3_path.name}")
             
             self.preprocessor.save_voice_mappings()
             speaker_map = self.preprocessor.get_speaker_pitch_map()
             if len(speaker_map) > 1:
                 self._emit_log("info", f"Saved pitch mappings for {len(speaker_map) - 1} speakers")
+            
+            self._emit_log("info", "Generating M4B audiobook...")
+            self._generate_m4b(output_dir, self.job_state.epub_filename)
             
             self.job_manager.update_job(job_id, status=JobStatus.COMPLETED, progress=100.0)
             self._emit_log("info", "Conversion completed!", progress=100.0)
@@ -358,10 +523,12 @@ class ConversionJob:
         target_dir.mkdir(parents=True, exist_ok=True)
         
         mp3_files = sorted(output_dir.glob("*.mp3"))
-        for mp3_file in mp3_files:
-            shutil.copy2(mp3_file, target_dir / mp3_file.name)
+        m4b_files = sorted(output_dir.glob("*.m4b"))
+        all_files = mp3_files + m4b_files
+        for f in all_files:
+            shutil.copy2(f, target_dir / f.name)
         
-        self._emit_log("info", f"Copied {len(mp3_files)} files to {target_dir}")
+        self._emit_log("info", f"Copied {len(all_files)} files to {target_dir}")
 
     def stop(self) -> None:
         self.should_stop.set()
