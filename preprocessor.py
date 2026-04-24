@@ -956,15 +956,21 @@ class ExpressivePreprocessor:
         segments: list[TextSegment] = []
         remaining = text
 
-        for thought in thought_texts:
+        for thought in sorted(thought_texts, key=len, reverse=True):
             if not thought or thought not in remaining:
                 continue
-            
-            before, _, after = remaining.partition(thought)
-            
+
+            pattern = re.compile(r'(?<![a-zA-Z])' + re.escape(thought) + r'(?![a-zA-Z])')
+            match = pattern.search(remaining)
+            if not match:
+                continue
+
+            before = remaining[:match.start()]
+            after = remaining[match.end():]
+
             if before.strip():
                 segments.append(self._create_narration_segment(before.strip(), pause_after=0.0))
-            
+
             segments.append(self._create_thought_segment(thought))
             remaining = after
 
