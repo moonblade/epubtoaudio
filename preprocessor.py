@@ -949,6 +949,24 @@ class ExpressivePreprocessor:
         
         return self._split_by_thoughts(text, thought_texts)
 
+    def _is_thought_context(self, text: str, start: int, end: int) -> bool:
+        before = text[:start].rstrip()
+        after = text[end:].lstrip()
+        
+        starts_sentence = (
+            not before or
+            before.endswith(('.', '!', '?', '\n')) or
+            before.endswith(('."', '!"', '?"', '.\u201d', '!\u201d', '?\u201d'))
+        )
+        
+        ends_sentence = (
+            not after or
+            after.startswith(('.', '!', '?', '\n')) or
+            text[start:end].rstrip().endswith(('.', '!', '?'))
+        )
+        
+        return starts_sentence and ends_sentence
+
     def _split_by_thoughts(self, text: str, thought_texts: set[str]) -> list[TextSegment]:
         if not thought_texts or not text:
             return [self._create_narration_segment(text)] if text else []
@@ -963,6 +981,9 @@ class ExpressivePreprocessor:
             pattern = re.compile(r'(?<![a-zA-Z])' + re.escape(thought) + r'(?![a-zA-Z])')
             match = pattern.search(remaining)
             if not match:
+                continue
+
+            if not self._is_thought_context(remaining, match.start(), match.end()):
                 continue
 
             before = remaining[:match.start()]
