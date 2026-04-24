@@ -20,10 +20,24 @@ Refactored the conversion pipeline to separate text preprocessing from TTS synth
 - `POST /upload`: Added `preprocess_only` form parameter (default: `false`)
 - `POST /convert-from-browse`: Added `preprocess_only` form parameter (default: `false`)
 
+#### Text Processing Fixes
+- **Nested div duplication**: Skip parent `<div>` elements containing nested `<p>` elements (was causing content to be read twice)
+- **Italics thought detection**: Use word boundaries to prevent matching "me" inside "measure"
+- **Mid-sentence emphasis**: Only treat italics as thoughts when they start after punctuation AND end with punctuation
+- **Ellipsis handling**: Increased pause from 0.3s to 0.6s, now splits text at ellipsis to insert pause at correct position
+- **Roman numerals**: Convert Roman numerals (I-XX) to words after keywords like "tier", "level", "class" (e.g., "Tier III" → "Tier three")
+
+#### CLI Tools
+- **`pushepubaudio`**: New CLI script to upload generated MP3s to FileBrowser
+  - Creates folder in `/downloads/epub-audio/` named after the audio files
+  - Supports single file or directory of MP3s
+  - Auto-detects common prefix for multi-file uploads
+
 #### Files Changed
-- `preprocessor.py`: Added `ProcessedBook` dataclass with serialization
+- `preprocessor.py`: Added `ProcessedBook` dataclass with serialization, text processing fixes
 - `converter.py`: Split `run()` into `_preprocess_epub()` and `_synthesize_audio()` phases
 - `main.py`: Added `preprocess_only` parameter to upload endpoints
+- `pushepubaudio`: New CLI script for uploading audio to FileBrowser
 
 ## [PR #7] - 2026-04-17 - Audio Quality Enhancements & M4B Output
 
